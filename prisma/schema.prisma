@@ -1,0 +1,253 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Country {
+  FR
+  DE
+  ES
+  GB
+  BE
+  NL
+  LU
+  IT
+}
+
+enum EstablishmentType {
+  LONG_TERM_CARE    // EHPAD, nursing homes
+  ACUTE_CARE        // cliniques, hôpitaux privés
+  MENTAL_HEALTH     // psychiatrie, réhabilitation
+  NEW_MEDICINE      // longevity, intégratif, IV therapy
+  PALLIATIVE        // soins palliatifs
+  PRIMARY_CARE      // MSP, centres de santé
+}
+
+enum LegalStatus {
+  PUBLIC
+  PRIVATE_FOR_PROFIT
+  PRIVATE_NON_PROFIT
+  ASSOCIATION
+}
+
+enum OwnershipType {
+  INDEPENDENT
+  GROUP
+  PE_BACKED
+  LISTED
+  FAMILY
+}
+
+enum SignalType {
+  NEW_DIRECTOR
+  FINANCIAL_STRESS
+  TENDER
+  BUILDING_PERMIT
+  ACQUISITION
+  NEW_LOCATION
+  CLOSURE_RISK
+}
+
+enum Plan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum ContactSeniority {
+  C_LEVEL
+  DIRECTOR
+  MANAGER
+  OTHER
+}
+
+// ─────────────────────────────────────────────
+// Groups / Holdings
+// ─────────────────────────────────────────────
+
+model Group {
+  id                 String        @id @default(cuid())
+  name               String
+  country            Country
+  hqCity             String?
+  nbEstablishments   Int           @default(0)
+  totalBeds          Int           @default(0)
+  ownershipType      OwnershipType @default(INDEPENDENT)
+  website            String?
+  linkedinUrl        String?
+  description        String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  establishments     Establishment[]
+  contacts           Contact[]
+
+  @@index([country])
+  @@index([ownershipType])
+}
+
+// ─────────────────────────────────────────────
+// Establishments
+// ─────────────────────────────────────────────
+
+model Establishment {
+  id                String            @id @default(cuid())
+  name              String
+  type              EstablishmentType
+  subtype           String?
+
+  // Location
+  country           Country
+  region            String?
+  department        String?
+  city              String
+  address           String?
+  postalCode        String?
+  lat               Float?
+  lng               Float?
+
+  // Capacity
+  beds              Int?
+  capacity          Int?
+
+  // Legal & ownership
+  legalStatus       LegalStatus?
+  ownershipType     OwnershipType     @default(INDEPENDENT)
+  groupId           String?
+  group             Group?            @relation(fields: [groupId], references: [id])
+
+  // Financials
+  revenueRange      String?           // e.g. "1M-5M", "5M-20M"
+  employeeCount     Int?
+
+  // Metadata
+  foundedYear       Int?
+  website           String?
+  phone             String?
+  email             String?
+
+  // Source identifiers
+  finessId          String?           @unique
+  cqcId             String?           @unique
+  externalId        String?
+  sourceUrl         String?
+
+  // Quality
+  dataQualityScore  Int               @default(0)  // 0–100
+  lastUpdated       DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  contacts          Contact[]
+  signals           Signal[]
+
+  @@index([country, type])
+  @@index([country, city])
+  @@index([groupId])
+  @@index([finessId])
+  @@index([lat, lng])
+}
+
+// ─────────────────────────────────────────────
+// Contacts / Decision makers
+// ─────────────────────────────────────────────
+
+model Contact {
+  id                String           @id @default(cuid())
+  establishmentId   String?
+  establishment     Establishment?   @relation(fields: [establishmentId], references: [id])
+  groupId           String?
+  group             Group?           @relation(fields: [groupId], references: [id])
+
+  firstName         String?
+  lastName          String
+  title             String?          // "Directeur général", "DRH", etc.
+  seniority         ContactSeniority @default(OTHER)
+
+  // Contact details (gated behind credits)
+  email             String?
+  phone             String?
+  linkedinUrl       String?
+
+  verifiedAt        DateTime?
+  source            String?          // "pappers", "linkedin", "manual"
+  creditsRequired   Int              @default(1)
+
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([establishmentId])
+  @@index([groupId])
+}
+
+// ─────────────────────────────────────────────
+// Timing signals
+// ─────────────────────────────────────────────
+
+model Signal {
+  id                String        @id @default(cuid())
+  establishmentId   String
+  establishment     Establishment @relation(fields: [establishmentId], references: [id])
+
+  type              SignalType
+  description       String
+  sourceUrl         String?
+  detectedAt        DateTime      @default(now())
+  expiresAt         DateTime?
+
+  createdAt         DateTime      @default(now())
+
+  @@index([establishmentId])
+  @@index([type])
+  @@index([detectedAt])
+}
+
+// ─────────────────────────────────────────────
+// Users
+// ─────────────────────────────────────────────
+
+model User {
+  id              String   @id @default(cuid())
+  clerkId         String   @unique
+  email           String   @unique
+  name            String?
+  plan            Plan     @default(FREE)
+  credits         Int      @default(10)
+  icpType         String?  // "supplier", "investor", "health_group"
+
+  savedSearches   SavedSearch[]
+  unlockedContacts UnlockedContact[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SavedSearch {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  name        String
+  filters     Json     // serialized filter state
+  alertsOn    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}
+
+model UnlockedContact {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  contactId   String
+  unlockedAt  DateTime @default(now())
+
+  @@unique([userId, contactId])
+}
