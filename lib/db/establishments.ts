@@ -12,6 +12,7 @@ interface QueryParams {
   legalStatus?: LegalStatus
   ownership?: OwnershipType
   signal?: SignalType
+  department?: string
   minBeds?: number
   maxBeds?: number
   page?: number
@@ -25,6 +26,7 @@ export async function getEstablishments({
   legalStatus,
   ownership,
   signal,
+  department,
   minBeds,
   maxBeds,
   page = 1,
@@ -43,6 +45,7 @@ export async function getEstablishments({
     ...(legalStatus && { legalStatus }),
     ...(ownership   && { ownershipType: ownership }),
     ...(signal      && { signals: { some: { type: signal } } }),
+    ...(department  && { department: { contains: department, mode: 'insensitive' } }),
     ...(minBeds !== undefined && { beds: { gte: minBeds } }),
     ...(maxBeds !== undefined && { beds: { lte: maxBeds } }),
   }

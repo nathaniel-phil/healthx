@@ -72,7 +72,7 @@ export function FilterPanel({ searchParams }: Props) {
 
   const clearAll = () => router.push(pathname)
 
-  const hasFilters = ['country', 'type', 'legalStatus', 'ownership', 'signal'].some(k => searchParams[k])
+  const hasFilters = ['country', 'type', 'legalStatus', 'ownership', 'signal', 'department'].some(k => searchParams[k])
 
   return (
     <div className="space-y-6 text-sm">
@@ -143,6 +143,17 @@ export function FilterPanel({ searchParams }: Props) {
             onChange={() => toggle('signal', s.value)}
           />
         ))}
+      </FilterSection>
+
+      {/* Department */}
+      <FilterSection title="Department">
+        <input
+          type="text"
+          placeholder="e.g. 75, Rhône…"
+          className="input w-full"
+          defaultValue={searchParams.department}
+          onChange={e => update('department', e.target.value || undefined)}
+        />
       </FilterSection>
 
       {/* Beds range */}

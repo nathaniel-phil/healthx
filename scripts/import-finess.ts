@@ -2,119 +2,174 @@
  * Import FINESS data into PostgreSQL.
  *
  * Usage:
- *   1. Download the full FINESS export from data.gouv.fr:
- *      https://www.data.gouv.fr/fr/datasets/finess-extraction-du-fichier-des-etablissements/
- *      → Download "etalab-cs1100507-stock-20XXXXXX-0515.csv" (geolocalised, ~200k rows)
+ *   npx ts-node --compiler-options '{"module":"CommonJS"}' scripts/import-finess.ts [path-to-csv]
  *
- *   2. Run:
- *      DATABASE_URL=... npx ts-node scripts/import-finess.ts ./finess.csv
+ * Defaults to: data/etalab-cs1100507-stock-20260311-0343 (1).csv
+ *
+ * Column layout (0-indexed, etalab CS1100507 semicolon format, Latin-1 encoding):
+ *  0  record type            must equal "structureet"
+ *  1  finess_juridique       legal entity FINESS (not used as ID)
+ *  2  finess_et              establishment FINESS  → finessId  ← unique key
+ *  3  rs                     short name            → name (fallback)
+ *  4  rslongue               long name             → name (preferred)
+ *  7  numvoie                street number         ┐
+ *  8  typvoie                street type           ├─ address
+ *  9  voie                   street name           ┘
+ * 13  departement            dept code (01–976)    → department
+ * 15  ligneacheminement      "01440 VIRIAT"        → postalCode + city
+ * 16  telephone                                    → phone
+ * 18  categetab              category code         → type (see CAT_TO_TYPE)
+ * 19  libcategetab           category label        → subtype
+ * 26  codesph                public/private code   → legalStatus (see STATUT_TO_LEGAL)
+ * 30  datemaj                last update date      → lastUpdated
  */
 
 import { createReadStream } from 'fs'
 import { createInterface } from 'readline'
+import { join } from 'path'
 import { prisma } from '../lib/prisma'
 import type { EstablishmentType, LegalStatus } from '@prisma/client'
 
-// FINESS categorie → our EstablishmentType mapping (partial, extend as needed)
+const DEFAULT_CSV = join(__dirname, '../data/etalab-cs1100507-stock-20260311-0343 (1).csv')
+const BATCH_SIZE  = 200
+
+// ─── Mappers ─────────────────────────────────────────────────────────────────
+
+// categetab code → EstablishmentType
+// Verified against the actual file (see: awk -F';' '{print $19";"$20}' | uniq -c)
 const CAT_TO_TYPE: Record<string, EstablishmentType> = {
-  '500': 'LONG_TERM_CARE',   // EHPAD
-  '501': 'LONG_TERM_CARE',
-  '207': 'ACUTE_CARE',       // Clinique MCO
-  '355': 'MENTAL_HEALTH',    // CMP
-  '370': 'MENTAL_HEALTH',    // CATTP
-  '165': 'PRIMARY_CARE',     // Centre de santé
-  '190': 'PRIMARY_CARE',     // Maison de santé
-  '460': 'PALLIATIVE',       // USP
+  // Long-term care / residential
+  '500': 'LONG_TERM_CARE',  // EHPAD
+  '354': 'LONG_TERM_CARE',  // SSIAD
+  '202': 'LONG_TERM_CARE',  // Résidence autonomie
+  '255': 'LONG_TERM_CARE',  // MAS
+  '382': 'LONG_TERM_CARE',  // Foyer de vie adultes handicapés
+  '448': 'LONG_TERM_CARE',  // Étab. acc. médicalisé personnes handicapées
+  '449': 'LONG_TERM_CARE',  // Étab. acc. non médicalisé personnes handicapées
+  '446': 'LONG_TERM_CARE',  // SAVS
+  '445': 'LONG_TERM_CARE',  // SAMSAH
+  '460': 'LONG_TERM_CARE',  // Service autonomie aide (SAA)
+  '462': 'LONG_TERM_CARE',  // Lieux de vie et d'accueil
+
+  // Mental health
+  '292': 'MENTAL_HEALTH',   // CHS maladies mentales
+  '156': 'MENTAL_HEALTH',   // CMP
+  '425': 'MENTAL_HEALTH',   // CATTP
+  '182': 'MENTAL_HEALTH',   // SESSAD
+  '183': 'MENTAL_HEALTH',   // IME
+  '186': 'MENTAL_HEALTH',   // ITEP
+  '188': 'MENTAL_HEALTH',   // Institut déficients auditifs
+  '189': 'MENTAL_HEALTH',   // Institut déficients visuels
+
+  // Primary / community care
+  '124': 'PRIMARY_CARE',    // Centre de santé
+  '603': 'PRIMARY_CARE',    // Maison de santé (L.6223-3)
+  '604': 'PRIMARY_CARE',    // CPTS
+  '223': 'PRIMARY_CARE',    // PMI
+  '230': 'PRIMARY_CARE',    // Consultation protection infantile
 }
 
+// codesph (col 26) → LegalStatus
+// Actual codes found in the file: 1, 6, 7, 2, 3, 0, 9 (blank = not applicable)
 const STATUT_TO_LEGAL: Record<string, LegalStatus> = {
-  '10': 'PUBLIC',
-  '20': 'PUBLIC',
-  '21': 'PUBLIC',
-  '50': 'PRIVATE_NON_PROFIT',
-  '51': 'PRIVATE_NON_PROFIT',
-  '60': 'PRIVATE_FOR_PROFIT',
-  '61': 'PRIVATE_FOR_PROFIT',
-  '70': 'ASSOCIATION',
+  '1': 'PUBLIC',             // Établissement public de santé
+  '6': 'PRIVATE_NON_PROFIT', // ESPIC
+  '7': 'PRIVATE_NON_PROFIT', // Privé non lucratif non ESPIC
+  '2': 'PRIVATE_NON_PROFIT', // PSPH par intégration
+  '3': 'PRIVATE_NON_PROFIT', // PSPH par concession
 }
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** "01440 VIRIAT" → { postalCode: "01440", city: "VIRIAT" } */
+function parseAddressLine(raw: string): { postalCode: string | null; city: string } {
+  const m = raw.trim().match(/^(\d{5})\s+(.+)$/)
+  if (m) return { postalCode: m[1], city: m[2] }
+  return { postalCode: null, city: raw.trim() || 'INCONNU' }
+}
+
+/** Rebuilds a street address from FINESS parts, e.g. "900 RTE DE PARIS" */
+function buildAddress(...parts: (string | undefined)[]): string | null {
+  const addr = (parts as string[]).map(p => p?.trim()).filter(Boolean).join(' ')
+  return addr || null
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const filePath = process.argv[2]
-  if (!filePath) {
-    console.error('Usage: ts-node import-finess.ts <path-to-csv>')
-    process.exit(1)
-  }
+  const filePath = process.argv[2] ?? DEFAULT_CSV
 
-  const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity })
+  console.log('Starting FINESS import…')
+  console.log(`Source: ${filePath}\n`)
 
-  let lineNum = 0
+  const rl = createInterface({
+    // FINESS files from data.gouv.fr are Latin-1 (ISO-8859-1), not UTF-8
+    input: createReadStream(filePath, { encoding: 'latin1' }),
+    crlfDelay: Infinity,
+  })
+
+  let lineNum  = 0
   let imported = 0
-  let skipped = 0
-  const BATCH_SIZE = 500
+  let skipped  = 0
   let batch: Parameters<typeof prisma.establishment.upsert>[0][] = []
 
   const flush = async () => {
     if (batch.length === 0) return
-    await prisma.$transaction(
-      batch.map(args => prisma.establishment.upsert(args))
-    )
+    await prisma.$transaction(batch.map(args => prisma.establishment.upsert(args)))
     imported += batch.length
     batch = []
-    process.stdout.write(`\r  Imported ${imported} establishments…`)
+    process.stdout.write(`\r  → ${imported.toLocaleString()} records imported…`)
   }
 
   for await (const line of rl) {
     lineNum++
-    if (lineNum === 1) continue // header
+    if (lineNum === 1) continue // first line is file metadata, not column names
 
-    // FINESS CSV uses semicolons, UTF-8
     const cols = line.split(';')
-    // Column order (etalab CS1100507):
-    // 0=structureet, 1=nofinesset, 2=nofinessej, 3=rs, 4=rslongue,
-    // 5=complrs, 6=compldistrib, 7=numvoie, 8=typvoie, 9=voie,
-    // 10=compvoie, 11=lieuditbp, 12=commune, 13=departement, 14=libdepartement,
-    // 15=ligneacheminement, 16=telephone, 17=telecopie, 18=categetab, 19=libcategetab,
-    // 20=categorieagretab (juridique), 21=libcategorieagretab, 22=siret, 23=codeape,
-    // 24=codemft, 25=libmft, 26=codesph, 27=libsph, 28=dateouv, 29=dateautor,
-    // 30=dateautn, 31=numuai, 32=coordxet, 33=coordyet, 34=geolocalisation, 35=sourcegeoloc
 
-    const finessId   = cols[1]?.trim()
-    const name       = (cols[4]?.trim() || cols[3]?.trim())
-    const address    = [cols[7], cols[8], cols[9]].filter(Boolean).map(s => s.trim()).join(' ')
-    const city       = cols[15]?.trim().replace(/^\d{5}\s*/, '') || cols[12]?.trim()
-    const postalCode = cols[15]?.trim().match(/^\d{5}/)?.[0]
-    const department = cols[13]?.trim()
-    const phone      = cols[16]?.trim()
+    // Only process establishment rows with a valid FINESS ET identifier
+    const finessId = cols[2]?.trim()  // col 2 = finess_et (establishment), NOT col 1 (legal entity)
+    if (!finessId || cols[0]?.trim() !== 'structureet') { skipped++; continue }
+
+    const name = cols[4]?.trim() || cols[3]?.trim()
+    if (!name) { skipped++; continue }
+
+    const { postalCode, city } = parseAddressLine(cols[15] ?? '')
     const catCode    = cols[18]?.trim()
-    const statutCode = cols[20]?.trim()
-    const lat        = parseFloat(cols[33]?.trim()) || undefined
-    const lng        = parseFloat(cols[32]?.trim()) || undefined
+    const statutCode = cols[26]?.trim()  // col 26 = codesph (codes: 1, 6, 7…), NOT col 20
 
-    if (!finessId || !name) { skipped++; continue }
-
-    const type = CAT_TO_TYPE[catCode] ?? 'PRIMARY_CARE'
+    const address    = buildAddress(cols[7], cols[8], cols[9])
+    const department = cols[13]?.trim() || null
+    const phone      = cols[16]?.trim() || null
+    const legalStatus = STATUT_TO_LEGAL[statutCode ?? ''] ?? undefined
+    const lastUpdated = cols[30]?.trim() ? new Date(cols[30].trim()) : new Date()
 
     batch.push({
-      where:  { finessId },
+      where: { finessId },
       create: {
-        finessId, name, type,
-        country:    'FR',
-        city:       city || 'Unknown',
-        address,
+        finessId,
+        name,
+        type:        CAT_TO_TYPE[catCode ?? ''] ?? 'ACUTE_CARE', // default: acute, not primary
+        subtype:     cols[19]?.trim() || null,
+        country:     'FR',
+        city,
         postalCode,
-        region:     department,
+        address,
         department,
         phone,
-        lat,
-        lng,
-        legalStatus: STATUT_TO_LEGAL[statutCode] ?? undefined,
-        lastUpdated: new Date(),
-        dataQualityScore: lat && lng ? 70 : 40,
+        legalStatus,
+        lastUpdated,
+        dataQualityScore: 30,
       },
       update: {
-        name, city: city || 'Unknown', address, lat, lng,
-        legalStatus: STATUT_TO_LEGAL[statutCode] ?? undefined,
-        lastUpdated: new Date(),
+        name,
+        city,
+        postalCode,
+        address,
+        department,
+        phone,
+        legalStatus,
+        lastUpdated,
       },
     })
 
@@ -122,7 +177,9 @@ async function main() {
   }
 
   await flush()
-  console.log(`\nDone. Imported: ${imported}, skipped: ${skipped}`)
+  console.log(`\n\nDone.`)
+  console.log(`  Imported : ${imported.toLocaleString()}`)
+  console.log(`  Skipped  : ${skipped.toLocaleString()}`)
   await prisma.$disconnect()
 }
 

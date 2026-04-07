@@ -18,6 +18,7 @@ export async function EstablishmentList({ searchParams }: Props) {
     legalStatus: searchParams.legalStatus as any,
     ownership:   searchParams.ownership as any,
     signal:      searchParams.signal as any,
+    department:  searchParams.department,
     minBeds:     searchParams.minBeds ? Number(searchParams.minBeds) : undefined,
     maxBeds:     searchParams.maxBeds ? Number(searchParams.maxBeds) : undefined,
     page,

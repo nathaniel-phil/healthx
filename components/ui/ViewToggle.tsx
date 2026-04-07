@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname, useSearchParams } from 'next/navigation'
-import { List, Map } from 'lucide-react'
+import { List, Columns2, Map } from 'lucide-react'
 import { clsx } from 'clsx'
 
 export function ViewToggle({ current }: { current: string }) {
@@ -18,12 +18,14 @@ export function ViewToggle({ current }: { current: string }) {
   return (
     <div className="flex items-center rounded-lg border border-gray-200 overflow-hidden">
       {[
-        { view: 'list', Icon: List,  label: 'List' },
-        { view: 'map',  Icon: Map,   label: 'Map' },
+        { view: 'list',  Icon: List,     label: 'List' },
+        { view: 'split', Icon: Columns2, label: 'Split' },
+        { view: 'map',   Icon: Map,      label: 'Map' },
       ].map(({ view, Icon, label }) => (
         <Link
           key={view}
           href={href(view)}
+          title={label}
           className={clsx(
             'flex items-center gap-1.5 px-3 py-2 text-sm transition-colors',
             current === view

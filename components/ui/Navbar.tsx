@@ -6,6 +6,7 @@ import { clsx } from 'clsx'
 
 const NAV_LINKS = [
   { href: '/search',    label: 'Search' },
+  { href: '/graph',     label: 'Graph' },
   { href: '/signals',   label: 'Signals' },
   { href: '/market',    label: 'Market' },
   { href: '/pricing',   label: 'Pricing' },
