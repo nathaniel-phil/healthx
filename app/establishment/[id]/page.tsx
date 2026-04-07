@@ -33,8 +33,9 @@ const SIGNAL_COLORS: Record<string, string> = {
 
 const SENIORITY_ORDER = ['C_LEVEL', 'DIRECTOR', 'MANAGER', 'OTHER']
 
-export default async function EstablishmentPage({ params }: { params: { id: string } }) {
-  const est = await getEstablishment(params.id)
+export default async function EstablishmentPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  const est = await getEstablishment(id)
   if (!est) notFound()
 
   const sortedContacts = [...est.contacts].sort(
